@@ -1,0 +1,100 @@
+name: BlinkHash Research CI
+
+on:
+  push:
+    branches: [ "research/**" ]
+  pull_request:
+    branches: [ "main", "research/**" ]
+    paths:
+      - "experiments/**"
+      - ".github/workflows/research-ci.yml"
+
+jobs:
+  research-matrix:
+    name: Research CI (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Display compiler version
+        run: |
+          ${{ matrix.compiler }} --version
+
+      - name: Run regression tests (ASan + UBSan)
+        run: |
+          set -e
+          mkdir -p build
+
+          echo "::group::Regression: Purge Cursor Invalidation"
+          ${{ matrix.compiler }} -std=c11 -Wall -Wextra -Iinclude -Iexperiments -fsanitize=address,undefined -g \
+              src/hash.c experiments/blinkhash_hybrid.c experiments/test_cursor_regression.c -o build/test_cursor
+          ./build/test_cursor
+          echo "::endgroup::"
+
+          echo "::group::Regression: SIMD vs SWAR Mask Equivalence"
+          ${{ matrix.compiler }} -std=c11 -Wall -Wextra -Iinclude -Iexperiments -fsanitize=address,undefined -g \
+              src/hash.c experiments/blinkhash_hybrid.c experiments/test_swar_simd.c -o build/test_swar
+          ./build/test_swar
+          echo "::endgroup::"
+
+          echo "::group::Regression: Handle Lifecycle & Post-TTL Invalidation"
+          ${{ matrix.compiler }} -std=c11 -Wall -Wextra -Iinclude -Iexperiments -fsanitize=address,undefined -g \
+              src/hash.c experiments/blinkhash_hybrid.c experiments/test_handle_lifecycle.c -o build/test_handle
+          ./build/test_handle
+          echo "::endgroup::"
+
+          echo "::group::Milestone M2.1: Decoupled Dynamic Arena & Fault Injection"
+          ${{ matrix.compiler }} -std=c11 -Wall -Wextra -Iinclude -Iexperiments -fsanitize=address,undefined -g \
+              src/hash.c experiments/blinkhash_hybrid.c experiments/test_arena_growth.c -o build/test_arena_growth
+          ./build/test_arena_growth
+          echo "::endgroup::"
+
+      - name: Run differential correctness tests (ASan + UBSan)
+        run: |
+          set -e
+          mkdir -p build
+
+          echo "::group::Differential: 25k Operations"
+          ${{ matrix.compiler }} -std=c11 -Wall -Wextra -Iinclude -Iexperiments -fsanitize=address,undefined -g \
+              src/hash.c src/store.c experiments/blinkhash_a.c experiments/blinkhash_b.c experiments/blinkhash_c.c \
+              experiments/blinkhash_hybrid.c experiments/test_correctness.c -o build/test_correctness
+          ./build/test_correctness
+          echo "::endgroup::"
+
+          echo "::group::Differential: 1,000,000 Operations"
+          ${{ matrix.compiler }} -std=c11 -Wall -Wextra -Iinclude -Iexperiments -fsanitize=address,undefined -O2 -g \
+              src/hash.c src/store.c experiments/blinkhash_a.c experiments/blinkhash_b.c experiments/blinkhash_c.c \
+              experiments/blinkhash_hybrid.c experiments/test_million_diff.c -o build/test_million
+          ./build/test_million
+          echo "::endgroup::"
+
+      - name: Verify audited benchmarks build
+        run: |
+          set -e
+          mkdir -p build
+          echo "::group::Build bench_audited"
+          ${{ matrix.compiler }} -std=c11 -Wall -Wextra -Iinclude -Iexperiments -O2 \
+              src/hash.c src/store.c experiments/blinkhash_a.c experiments/blinkhash_b.c experiments/blinkhash_c.c \
+              experiments/blinkhash_hybrid.c experiments/bench_audited.c -o build/bench_audited
+          echo "::endgroup::"
+
+          echo "::group::Build bench_m21_measure"
+          ${{ matrix.compiler }} -std=c11 -Wall -Wextra -Iinclude -Isrc -Iexperiments -O2 \
+              src/hash.c src/store.c experiments/blinkhash_hybrid.c experiments/bench_m21_measure.c -o build/bench_m21_measure
+          echo "::endgroup::"
+
+          echo "::group::Build bench_arena_growth_cmp"
+          ${{ matrix.compiler }} -std=c11 -Wall -Wextra -Iinclude -Isrc -Iexperiments -O2 \
+              src/hash.c experiments/blinkhash_hybrid.c experiments/bench_arena_growth_cmp.c -o build/bench_arena_growth_cmp
+          echo "::endgroup::"
+
+          echo "::group::Build bench_m2_vs_m21_tradeoff"
+          ${{ matrix.compiler }} -std=c11 -Wall -Wextra -Iinclude -Isrc -Iexperiments -O2 \
+              src/hash.c experiments/blinkhash_hybrid.c experiments/bench_m2_vs_m21_tradeoff.c -o build/bench_m2_vs_m21_tradeoff
+          echo "::endgroup::"
