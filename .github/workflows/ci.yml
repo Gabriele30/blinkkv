@@ -1,0 +1,49 @@
+name: BlinkKV Core CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  core-matrix:
+    name: Core CI (${{ matrix.compiler }} / ${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        target:
+          - test
+          - test_ndebug
+          - debug
+          - sanitize
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Display compiler version
+        run: |
+          ${{ matrix.compiler }} --version
+
+      - name: Run ${{ matrix.target }}
+        run: |
+          set -e
+          make clean
+          if [ "${{ matrix.target }}" = "sanitize" ]; then
+            make sanitize CC=${{ matrix.compiler }}
+          elif [ "${{ matrix.target }}" = "test_ndebug" ]; then
+            make test_ndebug CC=${{ matrix.compiler }}
+          elif [ "${{ matrix.target }}" = "debug" ]; then
+            make debug CC=${{ matrix.compiler }}
+          else
+            make test CC=${{ matrix.compiler }}
+          fi
+
+      - name: Build and verify baseline benchmark
+        run: |
+          set -e
+          make clean
+          make bench CC=${{ matrix.compiler }}
