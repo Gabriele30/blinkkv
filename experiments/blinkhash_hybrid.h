@@ -57,6 +57,14 @@ typedef enum {
     BHH_POLICY_INPLACE_REHASH = 1  /* In-place rehash to scrub tombstones if size <= capacity / 2 */
 } bhh_tombstone_policy;
 
+typedef enum {
+    BHH_GROWTH_1_5X = 0,           /* 1.5x geometric growth (tighter memory bounds & page reuse) */
+    BHH_GROWTH_2X   = 1            /* 2.0x doubling */
+} bhh_growth_policy;
+
+#define BHH_INITIAL_ARENA_CAP 64
+#define BHH_MAX_ARENA_CAP     0xFFFFFFFEU
+
 typedef struct {
     uint8_t  ctrl[BHH_GROUP_WIDTH];     /* 16 bytes: 0x80 = empty, 0xFE = deleted, 0x00..0x7F = fp */
     uint32_t handles[BHH_GROUP_WIDTH];  /* 64 bytes: 32-bit arena indices (0 = empty) */
@@ -85,6 +93,8 @@ typedef struct {
     size_t arena_count;            /* Arena high watermark */
     uint64_t rehash_count;         /* Total resizes performed */
     uint64_t inplace_rehash_count; /* In-place tombstone scrub operations */
+    uint64_t arena_realloc_count;  /* Total arena reallocations performed */
+    uint64_t arena_bytes_copied;   /* Total bytes copied during arena reallocations */
     double   avg_probe_groups;     /* Average probe groups traversed in lookups */
     uint32_t max_probe_groups;     /* Maximum probe groups traversed in lookups */
 } bhh_stats;
@@ -124,12 +134,15 @@ typedef struct {
 
     /* Configuration & Policies */
     bhh_tombstone_policy policy;
+    bhh_growth_policy growth_policy;
     bool force_swar;              /* If true, forces scalar SWAR path for testing */
     uint64_t seed;                /* Hash seed */
 
     /* Telemetry */
     uint64_t rehash_count;
     uint64_t inplace_rehash_count;
+    uint64_t arena_realloc_count;
+    uint64_t arena_bytes_copied;
     uint64_t total_lookups;
     uint64_t total_probe_steps;
     uint32_t max_probe_steps;
@@ -178,9 +191,11 @@ size_t bhh_purge_limit(bhh_table *table, uint64_t now_ms, size_t max_keys);
 size_t bhh_purge_time_budget(bhh_table *table, uint64_t now_ms, uint64_t budget_us);
 size_t bhh_purge_expired(bhh_table *table, uint64_t now_ms); /* Convenience alias for bhh_purge_all */
 
-/* Tombstone management */
+/* Tombstone & Growth management */
 void bhh_set_tombstone_policy(bhh_table *table, bhh_tombstone_policy policy);
 int bhh_scrub_tombstones(bhh_table *table);
+void bhh_set_growth_policy(bhh_table *table, bhh_growth_policy policy);
+bhh_growth_policy bhh_get_growth_policy(const bhh_table *table);
 
 /* Diagnostics & Telemetry */
 size_t bhh_size(const bhh_table *table);

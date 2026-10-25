@@ -49,6 +49,12 @@ jobs:
           ./build/test_handle
           echo "::endgroup::"
 
+          echo "::group::Milestone M2.1: Decoupled Dynamic Arena & Fault Injection"
+          ${{ matrix.compiler }} -std=c11 -Wall -Wextra -Iinclude -Iexperiments -fsanitize=address,undefined -g \
+              src/hash.c experiments/blinkhash_hybrid.c experiments/test_arena_growth.c -o build/test_arena_growth
+          ./build/test_arena_growth
+          echo "::endgroup::"
+
       - name: Run differential correctness tests (ASan + UBSan)
         run: |
           set -e

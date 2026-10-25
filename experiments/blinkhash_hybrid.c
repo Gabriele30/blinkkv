@@ -107,15 +107,28 @@ bhh_table *bhh_create(size_t initial_capacity)
 
 bhh_table *bhh_create_with_allocator(size_t initial_capacity, const bhh_allocator *alloc)
 {
-    size_t cap = next_pow2(initial_capacity);
-    if (cap < 16) cap = 16;
+    /* Reject incomplete custom allocator hooks to prevent mixing with system allocators */
+    if (alloc != NULL) {
+        if (!alloc->malloc_fn || !alloc->realloc_fn || !alloc->free_fn) {
+            return NULL;
+        }
+    }
 
-    bhh_table *table = calloc(1, sizeof(*table));
+    bhh_table *table = NULL;
+    if (alloc && alloc->malloc_fn) {
+        table = alloc->malloc_fn(sizeof(*table));
+        if (table) memset(table, 0, sizeof(*table));
+    } else {
+        table = calloc(1, sizeof(*table));
+    }
     if (!table) return NULL;
 
     if (alloc) {
         table->alloc = *alloc;
     }
+
+    size_t cap = next_pow2(initial_capacity);
+    if (cap < 16) cap = 16;
 
     table->capacity = cap;
     table->group_count = cap / BHH_GROUP_WIDTH;
@@ -124,11 +137,13 @@ bhh_table *bhh_create_with_allocator(size_t initial_capacity, const bhh_allocato
     table->tombstones = 0;
     table->payload_bytes = 0;
     table->policy = BHH_POLICY_INPLACE_REHASH;
+    table->growth_policy = BHH_GROWTH_1_5X;
     table->force_swar = false;
 
     table->groups = bhh_alloc_mem(table, table->group_count * sizeof(bhh_group));
     if (!table->groups) {
-        free(table);
+        if (table->alloc.free_fn) table->alloc.free_fn(table);
+        else free(table);
         return NULL;
     }
 
@@ -137,14 +152,18 @@ bhh_table *bhh_create_with_allocator(size_t initial_capacity, const bhh_allocato
         memset(table->groups[g].handles, 0, sizeof(table->groups[g].handles));
     }
 
-    table->arena_cap = cap;
+    /* Decoupled Dynamic Arena: start small with conservative capacity */
+    table->arena_cap = BHH_INITIAL_ARENA_CAP;
     table->arena_count = 1; /* 1-based, 0 is NULL */
     table->first_free = 0;
+    table->arena_realloc_count = 0;
+    table->arena_bytes_copied = 0;
 
     table->arena = bhh_alloc_mem(table, table->arena_cap * sizeof(bhh_record));
     if (!table->arena) {
         bhh_free_mem(table, table->groups);
-        free(table);
+        if (table->alloc.free_fn) table->alloc.free_fn(table);
+        else free(table);
         return NULL;
     }
     memset(table->arena, 0, table->arena_cap * sizeof(bhh_record));
@@ -164,7 +183,12 @@ void bhh_free(bhh_table *table)
 
     bhh_free_mem(table, table->groups);
     bhh_free_mem(table, table->arena);
-    free(table);
+
+    if (table->alloc.free_fn) {
+        table->alloc.free_fn(table);
+    } else {
+        free(table);
+    }
 }
 
 static inline void bhh_wheel_unlink(bhh_table *table, uint32_t handle_idx)
@@ -207,6 +231,7 @@ static inline void bhh_wheel_link(bhh_table *table, uint32_t handle_idx, uint64_
 
 static uint32_t bhh_arena_alloc(bhh_table *table)
 {
+    /* Prioritize reusing recycled slots from free list */
     if (table->first_free != 0) {
         uint32_t idx = table->first_free;
         table->first_free = table->arena[idx].next_expire;
@@ -218,16 +243,51 @@ static uint32_t bhh_arena_alloc(bhh_table *table)
         return idx;
     }
 
+    /* Grow arena dynamically when full */
     if (table->arena_count >= table->arena_cap) {
-        if (table->arena_cap >= (SIZE_MAX / 2) || (table->arena_cap * 2) >= 0xFFFFFFFEU) {
+        size_t old_cap = table->arena_cap;
+        if (old_cap >= BHH_MAX_ARENA_CAP) {
+            return 0; /* Exceeded 32-bit slot addressing limit */
+        }
+
+        size_t new_cap = 0;
+        if (table->growth_policy == BHH_GROWTH_2X) {
+            if (old_cap > (BHH_MAX_ARENA_CAP / 2)) {
+                new_cap = BHH_MAX_ARENA_CAP;
+            } else {
+                new_cap = old_cap * 2;
+            }
+        } else {
+            /* Default: 1.5x geometric growth */
+            size_t inc = old_cap >> 1;
+            if (inc < 32) inc = 32;
+            if (BHH_MAX_ARENA_CAP - old_cap < inc) {
+                new_cap = BHH_MAX_ARENA_CAP;
+            } else {
+                new_cap = old_cap + inc;
+            }
+        }
+
+        if (new_cap <= old_cap) {
             return 0;
         }
-        size_t new_cap = table->arena_cap * 2;
+
+        /* Check for size_t multiplication overflow */
+        if (new_cap > (SIZE_MAX / sizeof(bhh_record))) {
+            return 0;
+        }
+
         bhh_record *new_arena = bhh_realloc_mem(table, table->arena, new_cap * sizeof(bhh_record));
-        if (!new_arena) return 0;
-        memset(new_arena + table->arena_cap, 0, (new_cap - table->arena_cap) * sizeof(bhh_record));
+        if (!new_arena) {
+            return 0; /* Rollback: old arena and cap remain 100% intact */
+        }
+
+        /* Initialize ONLY the newly allocated slots */
+        memset(new_arena + old_cap, 0, (new_cap - old_cap) * sizeof(bhh_record));
         table->arena = new_arena;
         table->arena_cap = new_cap;
+        table->arena_realloc_count++;
+        table->arena_bytes_copied += (old_cap * sizeof(bhh_record));
     }
 
     uint32_t idx = (uint32_t)table->arena_count++;
@@ -814,10 +874,22 @@ void bhh_get_stats(const bhh_table *table, bhh_stats *stats_out)
     stats_out->arena_count = table->arena_count;
     stats_out->rehash_count = table->rehash_count;
     stats_out->inplace_rehash_count = table->inplace_rehash_count;
+    stats_out->arena_realloc_count = table->arena_realloc_count;
+    stats_out->arena_bytes_copied = table->arena_bytes_copied;
     stats_out->max_probe_groups = table->max_probe_steps;
     stats_out->avg_probe_groups = (table->total_lookups > 0)
         ? ((double)table->total_probe_steps / (double)table->total_lookups)
         : 1.0;
+}
+
+void bhh_set_growth_policy(bhh_table *table, bhh_growth_policy policy)
+{
+    if (table) table->growth_policy = policy;
+}
+
+bhh_growth_policy bhh_get_growth_policy(const bhh_table *table)
+{
+    return table ? table->growth_policy : BHH_GROWTH_1_5X;
 }
 
 void bhh_set_force_swar(bhh_table *table, bool enable)
