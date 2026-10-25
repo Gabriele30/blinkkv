@@ -23,5 +23,7 @@ Thumbs.db
 *.log
 *.csv
 *.jsonl
+*.tar.gz
+*.out
 
 tmp/build/
