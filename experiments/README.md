@@ -51,37 +51,79 @@ BlinkHash Hybrid combines vector-accelerated group probing with stable handle in
 
 ---
 
-## Arena Growth Strategy: 1.5× vs 2.0× Empirical Evaluation
+## 4-Phase Synchronized Lifecycle Memory Snapshots (Milestone M2.1 Audited Methodology)
 
-During Milestone M2.1, 1.5× and 2.0× geometric expansion factors were benchmarked across 100k, 300k, and 1M keys from a 1,024-slot start:
+To eliminate desynchronized state comparisons, memory and capacities are captured in **four distinct lifecycle snapshots** across 5 fork-isolated rounds, comparing BlinkHash Hybrid M2.1 (1.5x dynamic growth) against Baseline (`bk_store`) under identical active keys and 48-byte payloads (16-byte key, 32-byte value):
 
-| Scale | Strategy | Final Arena Cap | Unused Slots (Waste) | Reallocs | Cumulative Realloc Time | Peak RSS |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **100k** | 1.5× | 132,859 | 32,858 (24.7%) | 12 | 0.05 ms | **14.56 MB** |
-| **100k** | 2.0× | 131,072 | 31,071 (23.7%) | 7 | 0.04 ms | 14.31 MB |
-| **300k** | **1.5× (Chosen)** | **448,398** | **148,397 (33.1%)** | **15** | **0.08 ms** | **54.00 MB** |
-| **300k** | 2.0× | 524,288 | 224,287 (42.8%) | 9 | 0.08 ms | 54.00 MB |
-| **1M** | **1.5× (Chosen)** | **1,008,895** | **8,894 (0.9%)** | **17** | **0.11 ms** | **118.31 MB** |
-| **1M** | 2.0× | 1,048,576 | 48,575 (4.6%) | 10 | 0.07 ms | 120.06 MB |
+1. **Store Vuoto**: Immediately after table creation.
+2. **N Chiavi Vive**: Fully populated working set.
+3. **N/2 Vive (dopo DELETE)**: Half of the keys deleted.
+4. **N Vive (Reinserimento)**: Re-insertion of the deleted keys into recycled slots.
 
-**Findings**: 1.5× geometric growth achieves substantially tighter memory bounds (wasting only 0.9% of the arena at 1M keys vs 4.6% with 2.0×, and 33.1% at 300k vs 42.8% with 2.0×). Cumulative reallocation time across 1,000,000 keys is negligible (0.11 ms total, or ~0.1 ns/key), while peak SET spikes remain well within event-loop tolerance. 1.5× is set as the default policy.
+Slots are strictly classified into **Mai Allocati (Headroom)** vs **Free-List (Recycled)**:
+
+### 1,000,000 Keys Lifecycle Breakdown
+
+| Engine | Fase Lifecycle | Live Keys | SIMD Cap | Arena Cap | Mai Alloc. | Free-List | Tombstone | Payload Act. | Mem Interna | RSS Reale | Overhead/Key |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Hybrid M2.1** | 1. Store Vuoto | 0 | 2,097,152 | 64 | 63 | 0 | 0 | 0.00 MB | 10.01 MB | 11.00 MB | 0.0 B |
+| **Hybrid M2.1** | 2. N Chiavi Vive | 1,000,000 | 2,097,152 | 1,076,167 | 76,166 | 0 | 0 | 45.78 MB | 105.04 MB | 129.20 MB | **62.1 B** |
+| **Hybrid M2.1** | 3. N/2 Vive (DELETE) | 500,000 | 2,097,152 | 1,076,167 | 76,166 | 500,000 | 500,000 | 22.89 MB | 82.16 MB | 98.81 MB | 124.3 B |
+| **Hybrid M2.1** | 4. N Vive (Reinserito)| 1,000,000 | 2,097,152 | 1,076,167 | 76,166 | 0 | 0 | 45.78 MB | 105.04 MB | 132.93 MB | **62.1 B** |
+| **Baseline** | 1. Store Vuoto | 0 | 2,000,000 | N/A | 0 | 0 | 0 | 0.00 MB | 15.26 MB | 1.00 MB | 0.0 B |
+| **Baseline** | 2. N Chiavi Vive | 1,000,000 | 2,000,000 | N/A | 0 | 0 | 0 | 45.78 MB | 114.44 MB | 161.48 MB | 72.0 B |
+| **Baseline** | 3. N/2 Vive (DELETE) | 500,000 | 2,000,000 | N/A | 0 | 0 | 0 | 22.89 MB | 64.85 MB | 169.11 MB | 88.0 B |
+| **Baseline** | 4. N Vive (Reinserito)| 1,000,000 | 2,000,000 | N/A | 0 | 0 | 0 | 45.78 MB | 114.44 MB | 169.11 MB | 72.0 B |
+
+**Key State-Equivalence Takeaways**:
+- **Real RAM Savings vs Baseline**: At 1,000,000 keys, Hybrid uses **129.20 MB RSS vs 161.48 MB Baseline (-20.0% RAM reduction)**. At 300,000 keys, Hybrid uses **41.46 MB RSS vs 49.32 MB Baseline (-15.9% RAM reduction)**.
+- **Strict Free-List Recycling**: In Phase 3, 500,000 deleted slots move to the free-list (`freelist_count = 500,000`). In Phase 4, all 500,000 slots are recycled without growing the arena (`never_allocated_slots` remains constant at 76,166).
 
 ---
 
-## Audited Comparative Benchmark Summary (WSL2 / AMD Ryzen 5 8400F)
+## Real Arena Growth Benchmark: 1.5× vs 2.0×
+
+Executed **strictly through the public API** (`bhh_set_growth_policy` and `bhh_set`), measuring the complete SET latency including internal reallocations across 5 rounds with strictly alternating execution order:
+
+| Scale | Strategy | Reallocs | Subject Bytes | Final Arena Cap | Headroom (Unused) | Internal Mem | Peak RSS (VmHWM) | SET QPS | p50 | p95 | p99 | p99.9 | Max Spike |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **100k** | 1.5× (M2.1) | 20 | 12.87 MB | 141,718 | 41,717 | 12.32 MB | 16.38 MB | 4.71 Mops/s | 0.05 µs | 0.13 µs | 1.85 µs | 4.63 µs | 1.20 ms |
+| **100k** | 2.0× | 12 | 12.00 MB | 131,072 | 31,071 | 11.83 MB | 15.88 MB | 5.10 Mops/s | 0.05 µs | 0.11 µs | 1.83 µs | 4.48 µs | 1.67 ms |
+| **300k** | **1.5× (M2.1)** | **21** | **29.19 MB** | **318,865** | **18,864** | **33.33 MB** | **43.38 MB** | **4.38 Mops/s** | **0.05 µs** | **0.16 µs** | **1.88 µs** | **4.60 µs** | **2.77 ms** |
+| **300k** | 2.0× | 13 | 24.00 MB | 524,288 | 224,287 | 42.74 MB | 52.88 MB | 4.07 Mops/s | 0.07 µs | 0.20 µs | 1.89 µs | 4.53 µs | 6.89 ms |
+| **1M** | **1.5× (M2.1)** | **24** | **98.52 MB** | **1,076,167** | **76,166** | **105.04 MB** | **136.50 MB** | **3.65 Mops/s** | **0.11 µs** | **0.23 µs** | **1.94 µs** | **5.04 µs** | **10.94 ms** |
+| **1M** | 2.0× | 14 | 48.00 MB | 1,048,576 | 48,575 | 103.78 MB | 135.25 MB | 3.92 Mops/s | 0.11 µs | 0.23 µs | 1.92 µs | 4.59 µs | 13.47 ms |
 
 > [!NOTE]
-> Tests executed on Linux 6.6 (Ubuntu 24.04), GCC 13.3.0 (`-O2`), with 1,000,000 keys (16-byte key, 32-byte value = 48 bytes payload). Median of 5 trials with complete process isolation via `fork()`.
+> **Architectural Note on Realloc Non-Determinism**:  
+> "Subject Bytes" indicates the cumulative sum of existing arena buffers passed to `realloc()`. Under Linux/glibc, large allocations (>128 KB) utilize `mremap(MREMAP_MAYMOVE)`. If adjacent virtual address space is free or can be remapped at the page-table level, the kernel updates virtual mappings without physically copying memory pages on the CPU. Reallocation latency is inherently non-deterministic and depends on address space fragmentation and kernel page-table topology.
 
-| Engine | SET (Mops/s) | Pure Hit (Mops/s) | Copy-Out (Mops/s) | Zero-Copy (Mops/s) | DEL (Mops/s) | Mem/Key | Delta RSS/Key |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Baseline (Chaining)** | 3.02 | 6.34 | 5.90 | N/A | 6.04 | 96.0 B | 160.4 B |
-| **Candidate A (SIMD Flat)** | 3.19 | 5.93 | 6.03 | 5.74 | 5.71 | 117.2 B | 133.7 B |
-| **Candidate B (Robin Hood)** | 3.71 | 5.99 | 5.85 | 5.92 | 4.24 | 131.9 B | 113.2 B |
-| **Candidate C (Epoch)** | 3.60 | 5.99 | 6.15 | 6.01 | 4.11 | 148.7 B | 121.2 B |
-| **Hybrid (M2.1 Decoupled)** | **4.77** | **10.74** | **11.29** | **10.78** | **9.18** | **86.1 B** | **126.6 B** |
+---
 
-*Disclaimer: Performance depends on memory subsystem bandwidth, cache topology, CPU architecture, and compiler flags. These numbers serve solely as directional research signals.*
+## Architectural Trade-Off Analysis: M2 (Static Preallocated) vs M2.1 (Decoupled Dynamic)
+
+A complete empirical comparison between M2 (statically coupled preallocated arena) and M2.1 (decoupled dynamic geometric arena) illuminates the precise engineering trade-offs:
+
+| Metric / Dimension | M2 (Static Preallocation) | M2.1 (Decoupled Dynamic 1.5x) | Trade-Off Impact |
+| :--- | :---: | :---: | :--- |
+| **Internal Memory (300k keys)** | 66.74 MB | **33.33 MB** | **-50.1% RAM reduction** |
+| **Peak RSS (300k keys)** | 76.88 MB | **43.38 MB** | **-43.6% RAM reduction (-33.4 MB)** |
+| **Internal Memory (1M keys)** | 151.78 MB | **105.04 MB** | **-30.8% RAM reduction** |
+| **Peak RSS (1M keys)** | 183.25 MB | **136.50 MB** | **-25.5% RAM reduction (-46.7 MB)** |
+| **Populate SET Throughput (300k)**| 4.70 Mops/s | 4.21 Mops/s | -10.4% during initial expansion |
+| **Populate SET p50 / p95** | 0.06 µs / 0.18 µs | 0.06 µs / 0.18 µs | Identical fast path (0% change) |
+| **Populate SET p99 (Ramp-up Tail)**| 2.06 µs | 2.04 µs | Controlled tail during reallocations |
+| **Populate SET Worst Spike** | 48.66 µs (300k) / 248.68 µs (1M)| **3,007 µs (300k) / 9,764 µs (1M)**| **Reallocation pause spikes** |
+| **Steady-State GET Throughput** | 7.17 Mops/s | 7.18 Mops/s | **100% equivalent** |
+| **Steady-State GET p99** | **0.25 µs** | **0.26 µs** | **Sub-microsecond tail** |
+| **Continuous Churn SET QPS** | 3.67 Mops/s | 4.10 Mops/s | +11.7% throughput |
+| **Continuous Churn Reallocs** | 0 | **0** | **Zero reallocations under churn** |
+| **Continuous Churn Memory Growth** | 0.00 MB | **0.00 MB** | **Strictly bounded memory** |
+
+### Explicit Systems Trade-Off Summary
+1. **The Cost**: Dynamic geometric growth introduces reallocation pauses during initial population. While median latency (`p50 = 0.06 µs`) and fast-path lookup are completely unaffected, individual SET operations that trigger `realloc()` suffer latency spikes (worst latency reaches ~3.0 ms at 300k and ~9.8 ms at 1M keys).
+2. **The Benefit**: Eliminates the severe over-allocation of static coupling, cutting RSS by up to **-43.6% to -50.1%**, and bringing BlinkHash Hybrid from +13.5% above baseline to **-20.0% below baseline RSS**.
+3. **Steady-State & Churn Purity**: Once populated to the working set size, tail latency returns immediately to **0.26 µs** (10x faster than during ramp-up). During continuous key churn (delete + insert), the intrusive free-list absorbs 100% of mutations with zero additional reallocations and zero memory drift.
 
 ---
 
@@ -116,16 +158,18 @@ gcc -std=c11 -Wall -Wextra -Iinclude -Iexperiments -fsanitize=address,undefined 
     experiments/blinkhash_hybrid.c experiments/test_million_diff.c -o build/test_million && ./build/test_million
 ```
 
-### Run 10-Million Operations Deep Stress Test
+### Run Audited Benchmarks
 ```bash
-# 10,000,000 operations with 1,000,000 concurrent live keys, churn, and fault injection
-gcc -std=c11 -Wall -Wextra -Iinclude -Iexperiments -fsanitize=address,undefined -O2 -g \
-    src/hash.c experiments/blinkhash_hybrid.c experiments/test_stress_10m.c -o build/test_stress && ./build/test_stress
+# 1. Audited 4-phase lifecycle memory benchmark (Baseline vs Hybrid M2.1)
+gcc -std=c11 -Wall -Wextra -Wpedantic -O2 -march=native -Iinclude -Isrc -Iexperiments \
+    src/hash.c src/store.c experiments/blinkhash_hybrid.c experiments/bench_m21_measure.c -o build/bench_m21_measure && ./build/bench_m21_measure
+
+# 2. Real arena growth benchmark (1.5x vs 2.0x public API)
+gcc -std=c11 -Wall -Wextra -Wpedantic -O2 -march=native -Iinclude -Isrc -Iexperiments \
+    src/hash.c experiments/blinkhash_hybrid.c experiments/bench_arena_growth_cmp.c -o build/bench_arena_growth_cmp && ./build/bench_arena_growth_cmp
+
+# 3. M2 vs M2.1 architectural trade-off validation
+gcc -std=c11 -Wall -Wextra -Wpedantic -O2 -march=native -Iinclude -Isrc -Iexperiments \
+    src/hash.c experiments/blinkhash_hybrid.c experiments/bench_m2_vs_m21_tradeoff.c -o build/bench_m2_vs_m21_tradeoff && ./build/bench_m2_vs_m21_tradeoff
 ```
 
-### Run Process-Isolated Audited Benchmark
-```bash
-gcc -std=c11 -Wall -Wextra -Iinclude -Iexperiments -O2 -march=native \
-    src/hash.c src/store.c experiments/blinkhash_a.c experiments/blinkhash_b.c experiments/blinkhash_c.c \
-    experiments/blinkhash_hybrid.c experiments/bench_audited.c -o build/bench_audited && ./build/bench_audited
-```

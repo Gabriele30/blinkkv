@@ -91,6 +91,9 @@ typedef struct {
     size_t capacity;               /* Index capacity */
     size_t arena_cap;              /* Arena capacity */
     size_t arena_count;            /* Arena high watermark */
+    size_t never_allocated_slots;  /* Arena capacity never reached */
+    size_t freelist_count;         /* Slots currently in free-list */
+    size_t payload_bytes;          /* Exact active payload bytes */
     uint64_t rehash_count;         /* Total resizes performed */
     uint64_t inplace_rehash_count; /* In-place tombstone scrub operations */
     uint64_t arena_realloc_count;  /* Total arena reallocations performed */

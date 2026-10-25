@@ -74,10 +74,27 @@ jobs:
           ./build/test_million
           echo "::endgroup::"
 
-      - name: Verify audited benchmark build
+      - name: Verify audited benchmarks build
         run: |
           set -e
           mkdir -p build
+          echo "::group::Build bench_audited"
           ${{ matrix.compiler }} -std=c11 -Wall -Wextra -Iinclude -Iexperiments -O2 \
               src/hash.c src/store.c experiments/blinkhash_a.c experiments/blinkhash_b.c experiments/blinkhash_c.c \
               experiments/blinkhash_hybrid.c experiments/bench_audited.c -o build/bench_audited
+          echo "::endgroup::"
+
+          echo "::group::Build bench_m21_measure"
+          ${{ matrix.compiler }} -std=c11 -Wall -Wextra -Iinclude -Isrc -Iexperiments -O2 \
+              src/hash.c src/store.c experiments/blinkhash_hybrid.c experiments/bench_m21_measure.c -o build/bench_m21_measure
+          echo "::endgroup::"
+
+          echo "::group::Build bench_arena_growth_cmp"
+          ${{ matrix.compiler }} -std=c11 -Wall -Wextra -Iinclude -Isrc -Iexperiments -O2 \
+              src/hash.c experiments/blinkhash_hybrid.c experiments/bench_arena_growth_cmp.c -o build/bench_arena_growth_cmp
+          echo "::endgroup::"
+
+          echo "::group::Build bench_m2_vs_m21_tradeoff"
+          ${{ matrix.compiler }} -std=c11 -Wall -Wextra -Iinclude -Isrc -Iexperiments -O2 \
+              src/hash.c experiments/blinkhash_hybrid.c experiments/bench_m2_vs_m21_tradeoff.c -o build/bench_m2_vs_m21_tradeoff
+          echo "::endgroup::"

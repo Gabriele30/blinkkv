@@ -872,6 +872,19 @@ void bhh_get_stats(const bhh_table *table, bhh_stats *stats_out)
     stats_out->capacity = table->capacity;
     stats_out->arena_cap = table->arena_cap;
     stats_out->arena_count = table->arena_count;
+    stats_out->never_allocated_slots = (table->arena_cap >= table->arena_count)
+        ? (table->arena_cap - table->arena_count)
+        : 0;
+
+    size_t fl = 0;
+    uint32_t curr = table->first_free;
+    while (curr != 0 && curr < table->arena_count) {
+        fl++;
+        curr = table->arena[curr].next_expire;
+    }
+    stats_out->freelist_count = fl;
+    stats_out->payload_bytes = table->payload_bytes;
+
     stats_out->rehash_count = table->rehash_count;
     stats_out->inplace_rehash_count = table->inplace_rehash_count;
     stats_out->arena_realloc_count = table->arena_realloc_count;
